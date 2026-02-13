@@ -1,0 +1,15 @@
+[Unit]
+Description=FactoryBot - Agentic Software Factory
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=diego
+WorkingDirectory=/home/diego/Documents/soft-factory
+Environment=PATH=/home/diego/Documents/soft-factory/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/diego/Documents/soft-factory/venv/bin/python run.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

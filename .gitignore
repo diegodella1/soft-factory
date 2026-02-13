@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+projects/*/src/node_modules/
+projects/*/src/.next/
+projects/*/src/dist/
+projects/*/src/__pycache__/
