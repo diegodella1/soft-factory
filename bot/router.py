@@ -2,6 +2,8 @@
 
 Routes incoming Telegram messages to the appropriate agent based on
 project state and detected intent.
+
+Flow: ideation → PRD → marketing → UX/UI → development → deployment
 """
 
 import logging
@@ -22,6 +24,8 @@ async def route_message(user_message: str, send_fn) -> None:
     """
     from bot.agents.ideation import handle as ideation_handle
     from bot.agents.prd_agent import handle as prd_handle
+    from bot.agents.marketing import handle as marketing_handle
+    from bot.agents.ux_ui import handle as ux_handle
     from bot.agents.development import handle as dev_handle
     from bot.agents.deployment import handle as deploy_handle
 
@@ -73,6 +77,10 @@ async def route_message(user_message: str, send_fn) -> None:
         await ideation_handle(slug, user_message, send_fn)
     elif state in ("prd_generation", "prd_review"):
         await prd_handle(slug, user_message, send_fn)
+    elif state in ("marketing", "marketing_review"):
+        await marketing_handle(slug, user_message, send_fn)
+    elif state in ("ux_design", "ux_review"):
+        await ux_handle(slug, user_message, send_fn)
     elif state in ("approved", "development"):
         await dev_handle(slug, user_message, send_fn)
     elif state == "deployment":
@@ -88,13 +96,6 @@ async def route_message(user_message: str, send_fn) -> None:
 
 async def handle_command(command: str, args: str, send_fn) -> None:
     """Handle an explicit bot command."""
-    from bot.agents.ideation import handle as ideation_handle
-    from bot.agents.prd_agent import handle as prd_handle
-    from bot.agents.prd_agent import start_prd_generation
-    from bot.agents.development import handle as dev_handle
-    from bot.agents.development import start_development
-    from bot.agents.deployment import handle as deploy_handle
-
     if command == "new":
         await _start_new_project(args, send_fn)
 
@@ -134,7 +135,6 @@ async def handle_command(command: str, args: str, send_fn) -> None:
         if not paused:
             await send_fn("No hay proyectos pausados.")
             return
-        # Check no active project
         active = store.get_active_project()
         if active:
             await send_fn(
@@ -142,7 +142,7 @@ async def handle_command(command: str, args: str, send_fn) -> None:
                 "Pausalo primero con /pause."
             )
             return
-        proj = paused[-1]  # Most recent paused
+        proj = paused[-1]
         store.resume_project(proj["slug"])
         state = store.load_state(proj["slug"])
         await send_fn(
@@ -151,7 +151,7 @@ async def handle_command(command: str, args: str, send_fn) -> None:
 
     elif command == "start":
         await send_fn(
-            "¡Hola! Soy FactoryBot, tu fábrica de software personal.\n\n"
+            "Soy FactoryBot, tu fábrica de software personal.\n\n"
             "Mandame una idea de proyecto y arrancamos a laburar.\n"
             "O usá /new para empezar formalmente.\n\n"
             "Comandos:\n"
@@ -188,8 +188,13 @@ async def _start_new_project(idea_text: str, send_fn):
 
 
 async def _handle_approve(project: dict, send_fn):
-    """Handle approval of current phase."""
+    """Handle approval of current phase.
+
+    Flow: ideation → PRD → marketing → UX/UI → development → deployment
+    """
     from bot.agents.prd_agent import start_prd_generation
+    from bot.agents.marketing import start_marketing
+    from bot.agents.ux_ui import start_ux_design
     from bot.agents.development import start_development
     from bot.agents.deployment import start_deployment
 
@@ -202,8 +207,18 @@ async def _handle_approve(project: dict, send_fn):
         await start_prd_generation(slug, send_fn)
 
     elif state == "prd_review":
+        store.transition(slug, "marketing")
+        await send_fn("PRD aprobado. Ahora paso al copy y marketing...")
+        await start_marketing(slug, send_fn)
+
+    elif state == "marketing_review":
+        store.transition(slug, "ux_design")
+        await send_fn("Copy aprobado. Ahora paso al diseño UX/UI...")
+        await start_ux_design(slug, send_fn)
+
+    elif state == "ux_review":
         store.transition(slug, "approved")
-        await send_fn("PRD aprobado. Arranco el desarrollo...")
+        await send_fn("Diseño aprobado. Arranco el desarrollo con todo el material listo...")
         await start_development(slug, send_fn)
 
     elif state == "development":
@@ -237,7 +252,6 @@ async def _handle_revisit(text: str, intent: dict, send_fn):
         )
         return
 
-    # Load context
     project_log = store.load_document(proj["slug"], "PROJECT_LOG.md")
     if project_log:
         summary = project_log[:500]
@@ -253,11 +267,8 @@ async def _handle_revisit(text: str, intent: dict, send_fn):
             f"Retomando *{proj['name']}* (estado: {proj['state']}). ¿Qué querés hacer?"
         )
 
-    # If it was paused, resume
     if proj["state"] == "paused":
         store.resume_project(proj["slug"])
-
-    # If deployed, set to ideation for new features
     if proj["state"] == "deployed":
         store.transition(proj["slug"], "ideation")
 
@@ -273,6 +284,8 @@ async def _show_all_status(send_fn):
     for p in projects:
         emoji = {
             "ideation": "💡", "prd_generation": "📝", "prd_review": "📋",
+            "marketing": "📣", "marketing_review": "📣",
+            "ux_design": "🎨", "ux_review": "🎨",
             "approved": "✅", "development": "🔨", "deployment": "🚀",
             "deployed": "🌐", "paused": "⏸", "blocked": "🚫",
         }.get(p["state"], "❓")

@@ -80,13 +80,25 @@ Rules:
 
 PRD:
 {prd}
+
+MARKETING BRIEF (use this copy in the frontend — do NOT use Lorem Ipsum):
+{marketing_brief}
+
+UX/UI SPEC (follow these design tokens, layouts, and components exactly):
+{ux_spec}
 """
 
 FILE_PROMPT = """\
-Generate the complete content for this file based on the PRD and build context.
+Generate the complete content for this file based on the PRD, marketing copy, and UX/UI spec.
 
 PROJECT PRD:
 {prd}
+
+MARKETING BRIEF (use actual copy from here):
+{marketing_brief}
+
+UX/UI SPEC (follow design tokens and component specs):
+{ux_spec}
 
 FILE TO CREATE: {filepath}
 STEP DESCRIPTION: {description}
@@ -132,17 +144,24 @@ DECISION NEEDED: {decision}
 
 
 async def start_development(slug: str, send_fn) -> None:
-    """Begin development from an approved PRD."""
+    """Begin development from an approved PRD + Marketing Brief + UX Spec."""
     store.transition(slug, "development")
     prd = store.load_document(slug, "PRD.md")
     if not prd:
         await send_fn("Error: no encontré el PRD.md. Algo salió mal.")
         return
 
-    await send_fn("Arranco el desarrollo. Primero creo el plan de build...")
+    marketing_brief = store.load_document(slug, "MARKETING_BRIEF.md") or ""
+    ux_spec = store.load_document(slug, "UX_SPEC.md") or ""
+
+    await send_fn("Arranco el desarrollo. Tengo el PRD, copy y diseño. Creo el plan de build...")
 
     # Generate build plan
-    plan_prompt = PLAN_PROMPT.format(prd=prd)
+    plan_prompt = PLAN_PROMPT.format(
+        prd=prd,
+        marketing_brief=marketing_brief[:2000],
+        ux_spec=ux_spec[:2000],
+    )
     raw_plan = await chat(
         SYSTEM_PROMPT,
         [{"role": "user", "content": plan_prompt}],
@@ -199,7 +218,7 @@ async def start_development(slug: str, send_fn) -> None:
 
             elif step_type == "create_file":
                 rel_path = step.get("path", "")
-                await _create_file(slug, src, rel_path, desc, prd)
+                await _create_file(slug, src, rel_path, desc, prd, marketing_brief, ux_spec)
 
             elif step_type == "run_command":
                 cmd = step.get("command", "")
@@ -258,13 +277,17 @@ async def handle(slug: str, user_message: str, send_fn) -> None:
     await send_fn(response)
 
 
-async def _create_file(slug: str, src: Path, rel_path: str, description: str, prd: str) -> None:
+async def _create_file(
+    slug: str, src: Path, rel_path: str, description: str,
+    prd: str, marketing_brief: str = "", ux_spec: str = "",
+) -> None:
     """Generate and write a file using the LLM."""
-    # List existing files for context
     existing = _list_files(src)
 
     prompt = FILE_PROMPT.format(
-        prd=prd[:3000],  # Truncate PRD to save tokens
+        prd=prd[:3000],
+        marketing_brief=marketing_brief[:1500],
+        ux_spec=ux_spec[:1500],
         filepath=rel_path,
         description=description,
         existing_files="\n".join(existing[:30]),
