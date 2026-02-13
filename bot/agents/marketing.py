@@ -17,6 +17,7 @@ Outputs:
 
 import logging
 from bot.llm.client import chat
+from bot.llm.web_research import auto_research, research
 from bot.memory import store
 from bot.config import MAX_CONVERSATION_CONTEXT
 
@@ -156,6 +157,9 @@ USER PREFERENCES (from conversation):
 {conversation}
 
 Write ALL copy ready to be used in code. No placeholders like "[insert here]" — write the actual text.
+
+RESEARCH DATA (if available — use real info from here):
+{research_data}
 """
 
 
@@ -163,6 +167,12 @@ async def start_marketing(slug: str, send_fn) -> None:
     """Begin marketing brief generation by asking key questions."""
     idea_summary = store.load_document(slug, "IDEA_SUMMARY.md") or ""
     prd = store.load_document(slug, "PRD.md") or ""
+
+    # Research the project topic for real-world context
+    research_data = await research(
+        f"marketing copy examples for {idea_summary[:100]}",
+        f"Creating marketing copy for a software project: {idea_summary[:200]}",
+    )
 
     prompt = QUESTIONS_PROMPT.format(
         idea_summary=idea_summary[:1500],
@@ -200,7 +210,7 @@ async def handle(slug: str, user_message: str, send_fn) -> None:
 
 async def _generate_brief(slug: str, context: list[dict], send_fn) -> None:
     """Generate the full MARKETING_BRIEF.md."""
-    await send_fn("Generando el brief de marketing con todo el copy...")
+    await send_fn("Generando el brief de marketing con todo el copy... Investigando si hace falta...")
 
     idea_summary = store.load_document(slug, "IDEA_SUMMARY.md") or ""
     prd = store.load_document(slug, "PRD.md") or ""
@@ -208,10 +218,17 @@ async def _generate_brief(slug: str, context: list[dict], send_fn) -> None:
         f"{m['role'].upper()}: {m['content']}" for m in context[-10:]
     )
 
+    # Research for real data
+    research_data = await auto_research(
+        conversation[-500:] if conversation else idea_summary[:300],
+        idea_summary[:300],
+    ) or ""
+
     prompt = BRIEF_PROMPT.format(
         idea_summary=idea_summary[:1500],
         prd=prd[:3000],
         conversation=conversation,
+        research_data=research_data[:1500],
     )
 
     brief = await chat(

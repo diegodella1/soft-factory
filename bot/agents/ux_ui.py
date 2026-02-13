@@ -17,6 +17,7 @@ Outputs:
 
 import logging
 from bot.llm.client import chat
+from bot.llm.web_research import auto_research, research
 from bot.memory import store
 from bot.config import MAX_CONVERSATION_CONTEXT
 
@@ -206,6 +207,9 @@ MARKETING_BRIEF:
 USER PREFERENCES (from conversation):
 {conversation}
 
+DESIGN INSPIRATION (from research, if available):
+{research_data}
+
 Be specific with Tailwind classes and hex codes. The dev agent will copy-paste from this spec.
 """
 
@@ -260,15 +264,23 @@ async def handle(slug: str, user_message: str, send_fn) -> None:
 
 async def _generate_spec(slug: str, context: list[dict], send_fn) -> None:
     """Generate the full UX_SPEC.md."""
-    await send_fn("Diseñando la interfaz completa...")
+    await send_fn("Diseñando la interfaz completa... Investigando inspiración si hace falta...")
 
     prd = store.load_document(slug, "PRD.md") or ""
     marketing = store.load_document(slug, "MARKETING_BRIEF.md") or ""
+    idea_summary = store.load_document(slug, "IDEA_SUMMARY.md") or ""
     conversation = "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in context[-10:]
     )
 
+    # Research design inspiration if relevant
+    research_data = await auto_research(
+        conversation[-500:] if conversation else idea_summary[:300],
+        f"UX/UI design for: {idea_summary[:200]}",
+    ) or ""
+
     prompt = SPEC_PROMPT.format(
+        research_data=research_data[:1500],
         prd=prd[:3000],
         marketing_brief=marketing[:2000],
         conversation=conversation,

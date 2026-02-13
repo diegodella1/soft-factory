@@ -13,6 +13,7 @@ This agent acts as a sharp, honest creative partner. It:
 import json
 import logging
 from bot.llm.client import chat
+from bot.llm.web_research import auto_research
 from bot.memory import store
 from bot.config import MAX_CONVERSATION_CONTEXT
 
@@ -101,8 +102,15 @@ async def start_ideation(idea_text: str, send_fn) -> None:
 
     store.append_message(slug, "user", idea_text)
 
+    # Auto-research if the idea mentions people, companies, places, etc.
+    research_data = await auto_research(idea_text, idea_text)
+    research_context = ""
+    if research_data:
+        research_context = f"\n\n[RESEARCH RESULTS — use this info naturally in the conversation]\n{research_data}"
+        store.append_message(slug, "assistant", f"[Investigación automática realizada]")
+
     # Get the agent's first response
-    messages = [{"role": "user", "content": idea_text}]
+    messages = [{"role": "user", "content": idea_text + research_context}]
     response = await chat(
         SYSTEM_PROMPT,
         messages,
@@ -123,9 +131,20 @@ async def handle(slug: str, user_message: str, send_fn) -> None:
         await _finalize_idea(slug, context, send_fn)
         return
 
+    # Auto-research if the message mentions things that need looking up
+    state = store.load_state(slug)
+    project_context = state.get("name", "") if state else ""
+    research_data = await auto_research(user_message, project_context)
+    if research_data:
+        # Inject research as a system-like context message
+        context.append({
+            "role": "user",
+            "content": f"[RESEARCH RESULTS — use this info naturally]\n{research_data}",
+        })
+        store.append_message(slug, "assistant", "[Investigación web realizada]")
+
     # Check if we have an email yet
     email_status = await _check_email(context)
-    state = store.load_state(slug)
 
     if email_status.get("has_email") and email_status.get("email"):
         if not state.get("email"):
