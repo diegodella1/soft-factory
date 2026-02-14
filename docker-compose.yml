@@ -9,5 +9,6 @@ services:
     volumes:
       - ./projects:/app/projects
       - ./custom_prompts.json:/app/custom_prompts.json
+      - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
