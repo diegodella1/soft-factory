@@ -58,6 +58,8 @@ async def _cmd_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_owner(update):
         return
 
+    if not update.message:
+        return
     text = update.message.text or ""
     parts = text.split(maxsplit=1)
     command = parts[0].lstrip("/").split("@")[0]  # strip bot username

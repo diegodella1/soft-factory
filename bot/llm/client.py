@@ -18,6 +18,7 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     json_mode: bool = False,
+    project_slug: str | None = None,
 ) -> str:
     """Send a chat completion request.
 
@@ -28,6 +29,7 @@ async def chat(
         temperature: Sampling temperature.
         max_tokens: Max response tokens.
         json_mode: If True, request JSON output.
+        project_slug: If set, log token usage to this project.
 
     Returns:
         The assistant's response text.
@@ -49,6 +51,20 @@ async def chat(
         )
         content = resp.choices[0].message.content or ""
         log.debug("LLM [%s] tokens: %s", model, resp.usage)
+
+        # Track token usage per project
+        if project_slug and resp.usage:
+            try:
+                from bot.memory.store import log_usage
+                log_usage(
+                    project_slug,
+                    model,
+                    resp.usage.prompt_tokens,
+                    resp.usage.completion_tokens,
+                )
+            except Exception:
+                log.debug("Failed to log usage for %s", project_slug)
+
         return content
     except Exception:
         log.exception("LLM call failed (model=%s)", model)

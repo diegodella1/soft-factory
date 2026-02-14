@@ -184,6 +184,7 @@ async def start_marketing(slug: str, send_fn) -> None:
         [{"role": "user", "content": prompt}],
         heavy=False,
         temperature=0.7,
+        project_slug=slug,
     )
 
     store.append_message(slug, "assistant", response)
@@ -231,12 +232,20 @@ async def _generate_brief(slug: str, context: list[dict], send_fn) -> None:
         research_data=research_data[:1500],
     )
 
+    # Inject skills
+    from bot.skills import get_agent_skills
+    system = SYSTEM_PROMPT
+    skills_ctx = get_agent_skills("marketing")
+    if skills_ctx:
+        system += f"\n\n{skills_ctx}"
+
     brief = await chat(
-        SYSTEM_PROMPT,
+        system,
         [{"role": "user", "content": prompt}],
         heavy=True,
         temperature=0.5,
         max_tokens=4096,
+        project_slug=slug,
     )
 
     store.save_document(slug, "MARKETING_BRIEF.md", brief)
@@ -275,6 +284,7 @@ async def _revise_brief(slug: str, existing: str, feedback: str, send_fn) -> Non
         heavy=True,
         temperature=0.5,
         max_tokens=4096,
+        project_slug=slug,
     )
 
     store.save_document(slug, "MARKETING_BRIEF.md", brief)

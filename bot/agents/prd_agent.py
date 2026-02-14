@@ -27,11 +27,14 @@ Your personality: thorough but practical. You focus on what's needed to build V1
 IMPORTANT CONTEXT - This runs on a Raspberry Pi 5 (8GB RAM, ARM). Default tech choices:
 - Frontend: HTML/CSS/JS with Tailwind (lightweight, no build step)
 - Backend: Node.js with Express or Python with FastAPI
-- Database: SQLite for simple projects, PostgreSQL for complex ones
-- Deployment: Docker via Coolify
-- Web server: Caddy (automatic HTTPS) — already available via Coolify/Traefik
+- Database: Supabase (PostgreSQL) self-hosted local — REST API en http://192.168.1.14:54321/rest/v1/, \
+direct PostgreSQL en 192.168.1.14:5432. Usar @supabase/supabase-js para Node.js o REST directo. \
+Para proyectos simples sin DB, archivos JSON está bien.
+- Deployment: Docker directo (docker compose)
+- Web server: Caddy (automatic HTTPS) — available via Coolify/Traefik
 - Email: Resend (free tier)
-- Placeholder images: picsum.photos or local SVG
+- Placeholder images: https://placehold.co/ (ej: https://placehold.co/600x400, \
+https://placehold.co/600x400/EEE/31343C?text=Hero+Image)
 - Placeholder text: Contextually appropriate (NOT Lorem Ipsum)
 
 When generating the PRD:
@@ -144,6 +147,7 @@ async def start_prd_generation(slug: str, send_fn) -> None:
         [{"role": "user", "content": prompt}],
         heavy=True,
         temperature=0.5,
+        project_slug=slug,
     )
 
     store.append_message(slug, "assistant", response)
@@ -179,17 +183,29 @@ async def _generate_prd(slug: str, idea_summary: str, context: list[dict], send_
     conversation = "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in context
     )
+    # Inject skills and learnings
+    from bot.skills import get_agent_skills
+    from bot.agents.learning import learnings_context
+    system = SYSTEM_PROMPT
+    skills_ctx = get_agent_skills("prd")
+    if skills_ctx:
+        system += f"\n\n{skills_ctx}"
+    past_learnings = learnings_context()
+    if past_learnings:
+        system += f"\n\n{past_learnings}"
+
     prompt = GENERATE_PRD_PROMPT.format(
         idea_summary=idea_summary,
         conversation=conversation,
     )
 
     prd = await chat(
-        SYSTEM_PROMPT,
+        system,
         [{"role": "user", "content": prompt}],
         heavy=True,
         temperature=0.4,
         max_tokens=4096,
+        project_slug=slug,
     )
 
     store.save_document(slug, "PRD.md", prd)
@@ -228,6 +244,7 @@ async def _revise_prd(slug: str, existing_prd: str, feedback: str, context: list
         heavy=True,
         temperature=0.4,
         max_tokens=4096,
+        project_slug=slug,
     )
 
     store.save_document(slug, "PRD.md", prd)

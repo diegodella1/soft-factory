@@ -53,9 +53,11 @@ DOCKERFILE_PROMPT = """\
 Generate a Dockerfile for this project. It must:
 - Be ARM64 compatible
 - Be as lightweight as possible (use alpine or slim base images)
+- For Node.js: use node:20-alpine (NOT node:18)
 - Install only necessary dependencies
 - Expose the correct port
 - Have a proper CMD/ENTRYPOINT
+- Include a .dockerignore that excludes node_modules
 
 Project files:
 {file_list}
@@ -160,6 +162,10 @@ async def start_deployment(slug: str, send_fn) -> None:
 
     await _generate_project_log(slug, send_fn)
 
+    # Post-deploy learning
+    from bot.agents.learning import run_post_deploy_learning
+    await run_post_deploy_learning(slug, send_fn)
+
 
 async def handle(slug: str, user_message: str, send_fn) -> None:
     """Handle messages during deployment phase."""
@@ -195,12 +201,20 @@ async def _generate_dockerfile(slug: str, src: Path) -> None:
         package_content=package_content,
     )
 
+    # Inject skills for Dockerfile generation
+    from bot.skills import get_agent_skills
+    system = SYSTEM_PROMPT
+    skills_ctx = get_agent_skills("deployment")
+    if skills_ctx:
+        system += f"\n\n{skills_ctx}"
+
     content = await chat(
-        SYSTEM_PROMPT,
+        system,
         [{"role": "user", "content": prompt}],
         heavy=True,
         temperature=0.2,
         max_tokens=1000,
+        project_slug=slug,
     )
 
     content = _strip_fences(content)
@@ -334,6 +348,7 @@ async def _auto_fix_deploy(slug: str, src: Path, error_output: str, port: int) -
         temperature=0.2,
         max_tokens=3000,
         json_mode=True,
+        project_slug=slug,
     )
 
     try:
@@ -412,6 +427,7 @@ async def _generate_project_log(slug: str, send_fn) -> None:
         heavy=True,
         temperature=0.3,
         max_tokens=2000,
+        project_slug=slug,
     )
 
     store.save_document(slug, "PROJECT_LOG.md", project_log)

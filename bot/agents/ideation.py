@@ -109,13 +109,21 @@ async def start_ideation(idea_text: str, send_fn) -> None:
         research_context = f"\n\n[RESEARCH RESULTS — use this info naturally in the conversation]\n{research_data}"
         store.append_message(slug, "assistant", f"[Investigación automática realizada]")
 
+    # Inject learnings from past projects
+    from bot.agents.learning import learnings_context
+    past_learnings = learnings_context()
+    system = SYSTEM_PROMPT
+    if past_learnings:
+        system += f"\n\n{past_learnings}"
+
     # Get the agent's first response
     messages = [{"role": "user", "content": idea_text + research_context}]
     response = await chat(
-        SYSTEM_PROMPT,
+        system,
         messages,
         heavy=False,
         temperature=0.7,
+        project_slug=slug,
     )
 
     store.append_message(slug, "assistant", response)
@@ -144,7 +152,7 @@ async def handle(slug: str, user_message: str, send_fn) -> None:
         store.append_message(slug, "assistant", "[Investigación web realizada]")
 
     # Check if we have an email yet
-    email_status = await _check_email(context)
+    email_status = await _check_email(context, slug)
 
     if email_status.get("has_email") and email_status.get("email"):
         if not state.get("email"):
@@ -156,6 +164,7 @@ async def handle(slug: str, user_message: str, send_fn) -> None:
         context,
         heavy=False,
         temperature=0.7,
+        project_slug=slug,
     )
 
     store.append_message(slug, "assistant", response)
@@ -167,7 +176,7 @@ async def _finalize_idea(slug: str, context: list[dict], send_fn) -> None:
     await send_fn("Generando el resumen de la idea...")
 
     # Check email first
-    email_status = await _check_email(context)
+    email_status = await _check_email(context, slug)
     state = store.load_state(slug)
 
     if not state.get("email") and not email_status.get("has_email"):
@@ -193,10 +202,18 @@ async def _finalize_idea(slug: str, context: list[dict], send_fn) -> None:
         heavy=True,
         temperature=0.3,
         max_tokens=2000,
+        project_slug=slug,
     )
 
+    # Strip code fences before extracting name
+    import re
+    clean = summary.strip()
+    if re.match(r'^```\w*\n', clean):
+        clean = re.sub(r'^```\w*\n', '', clean)
+        clean = re.sub(r'\n```\s*$', '', clean)
+
     # Extract a better project name from the summary
-    first_line = summary.split("\n")[0].strip("# ").strip()
+    first_line = clean.split("\n")[0].strip("# ").strip()
     if first_line:
         store.update_state(slug, name=first_line)
 
@@ -210,7 +227,7 @@ async def _finalize_idea(slug: str, context: list[dict], send_fn) -> None:
     )
 
 
-async def _check_email(context: list[dict]) -> dict:
+async def _check_email(context: list[dict], slug: str = "") -> dict:
     """Check if the conversation includes a project email."""
     conversation_text = "\n".join(
         f"{m['role']}: {m['content']}" for m in context[-10:]
@@ -222,6 +239,7 @@ async def _check_email(context: list[dict]) -> dict:
         temperature=0.0,
         max_tokens=100,
         json_mode=True,
+        project_slug=slug or None,
     )
     try:
         return json.loads(raw)

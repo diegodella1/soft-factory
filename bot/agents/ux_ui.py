@@ -238,6 +238,7 @@ async def start_ux_design(slug: str, send_fn) -> None:
         [{"role": "user", "content": prompt}],
         heavy=False,
         temperature=0.7,
+        project_slug=slug,
     )
 
     store.append_message(slug, "assistant", response)
@@ -286,12 +287,20 @@ async def _generate_spec(slug: str, context: list[dict], send_fn) -> None:
         conversation=conversation,
     )
 
+    # Inject skills
+    from bot.skills import get_agent_skills
+    system = SYSTEM_PROMPT
+    skills_ctx = get_agent_skills("ux_ui")
+    if skills_ctx:
+        system += f"\n\n{skills_ctx}"
+
     spec = await chat(
-        SYSTEM_PROMPT,
+        system,
         [{"role": "user", "content": prompt}],
         heavy=True,
         temperature=0.4,
         max_tokens=4096,
+        project_slug=slug,
     )
 
     store.save_document(slug, "UX_SPEC.md", spec)
@@ -329,6 +338,7 @@ async def _revise_spec(slug: str, existing: str, feedback: str, send_fn) -> None
         heavy=True,
         temperature=0.4,
         max_tokens=4096,
+        project_slug=slug,
     )
 
     store.save_document(slug, "UX_SPEC.md", spec)

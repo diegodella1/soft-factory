@@ -3,7 +3,7 @@
 Routes incoming Telegram messages to the appropriate agent based on
 project state and detected intent.
 
-Flow: ideation → PRD → marketing → UX/UI → development → deployment
+Flow: ideation → PRD → marketing → UX/UI → development → QA → deployment
 """
 
 import logging
@@ -28,6 +28,8 @@ async def route_message(user_message: str, send_fn) -> None:
     from bot.agents.ux_ui import handle as ux_handle
     from bot.agents.development import handle as dev_handle
     from bot.agents.deployment import handle as deploy_handle
+    from bot.agents.qa_agent import handle as qa_handle
+    from bot.agents.revision import handle as revision_handle
 
     active = store.get_active_project()
     intent = await classify_intent(user_message)
@@ -83,8 +85,12 @@ async def route_message(user_message: str, send_fn) -> None:
         await ux_handle(slug, user_message, send_fn)
     elif state in ("approved", "development"):
         await dev_handle(slug, user_message, send_fn)
+    elif state in ("qa_testing", "qa_review"):
+        await qa_handle(slug, user_message, send_fn)
     elif state == "deployment":
         await deploy_handle(slug, user_message, send_fn)
+    elif state == "revision":
+        await revision_handle(slug, user_message, send_fn)
     elif state == "deployed":
         await send_fn(
             f"El proyecto *{active['name']}* ya está deployado en {active.get('url', 'N/A')}.\n"
@@ -196,12 +202,22 @@ async def _handle_approve(project: dict, send_fn):
     from bot.agents.marketing import start_marketing
     from bot.agents.ux_ui import start_ux_design
     from bot.agents.development import start_development
+    from bot.agents.qa_agent import start_qa
     from bot.agents.deployment import start_deployment
 
     slug = project["slug"]
     state = project["state"]
 
     if state == "ideation":
+        # First generate IDEA_SUMMARY.md if it doesn't exist yet
+        existing_summary = store.load_document(slug, "IDEA_SUMMARY.md")
+        if not existing_summary:
+            from bot.agents.ideation import _finalize_idea
+            context = store.get_context_messages(slug, limit=20)
+            await _finalize_idea(slug, context, send_fn)
+            # Check if finalization succeeded (it might ask for email and return)
+            if not store.load_document(slug, "IDEA_SUMMARY.md"):
+                return
         store.transition(slug, "prd_generation")
         await send_fn("Idea aprobada. Arranco a generar el PRD...")
         await start_prd_generation(slug, send_fn)
@@ -221,8 +237,14 @@ async def _handle_approve(project: dict, send_fn):
         await send_fn("Diseño aprobado. Arranco el desarrollo con todo el material listo...")
         await start_development(slug, send_fn)
 
-    elif state == "development":
-        await send_fn("Recibido. Sigo adelante con la sugerencia.")
+    elif state in ("approved", "development"):
+        await send_fn("Reiniciando el desarrollo...")
+        await start_development(slug, send_fn)
+
+    elif state == "qa_review":
+        store.transition(slug, "deployment")
+        await send_fn("QA aprobado manualmente. Paso al deploy...")
+        await start_deployment(slug, send_fn)
 
     elif state == "deployment":
         await start_deployment(slug, send_fn)
@@ -269,8 +291,8 @@ async def _handle_revisit(text: str, intent: dict, send_fn):
 
     if proj["state"] == "paused":
         store.resume_project(proj["slug"])
-    if proj["state"] == "deployed":
-        store.transition(proj["slug"], "ideation")
+    elif proj["state"] == "deployed":
+        store.transition(proj["slug"], "revision")
 
 
 async def _show_all_status(send_fn):
@@ -286,8 +308,10 @@ async def _show_all_status(send_fn):
             "ideation": "💡", "prd_generation": "📝", "prd_review": "📋",
             "marketing": "📣", "marketing_review": "📣",
             "ux_design": "🎨", "ux_review": "🎨",
-            "approved": "✅", "development": "🔨", "deployment": "🚀",
-            "deployed": "🌐", "paused": "⏸", "blocked": "🚫",
+            "approved": "✅", "development": "🔨",
+            "qa_testing": "🧪", "qa_review": "🧪",
+            "deployment": "🚀",
+            "deployed": "🌐", "revision": "🔧", "paused": "⏸", "blocked": "🚫",
         }.get(p["state"], "❓")
         url = f" — {p['url']}" if p.get("url") else ""
         lines.append(f"{emoji} *{p['name']}* — {p['state']}{url}")

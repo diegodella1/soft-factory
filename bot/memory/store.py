@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 from bot.config import PROJECTS_DIR, MAX_HISTORY_STORED
 
+LEARNINGS_FILE = PROJECTS_DIR / "global_learnings.json"
+
 log = logging.getLogger(__name__)
 
 # Valid project states
@@ -21,8 +23,11 @@ STATES = [
     "ux_review",
     "approved",
     "development",
+    "qa_testing",
+    "qa_review",
     "deployment",
     "deployed",
+    "revision",
     "paused",
     "blocked",
 ]
@@ -202,8 +207,20 @@ def get_context_messages(slug: str, limit: int = 20) -> list[dict]:
 # --- Document management ---
 
 
+def _strip_code_fences(text: str) -> str:
+    """Remove wrapping code fences (```markdown ... ```) that LLMs sometimes add."""
+    import re
+    stripped = text.strip()
+    m = re.match(r'^```\w*\n(.*?)```\s*$', stripped, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return stripped
+
+
 def save_document(slug: str, filename: str, content: str):
     """Save a document (IDEA_SUMMARY.md, PRD.md, PROJECT_LOG.md) to project dir."""
+    if filename.endswith(".md"):
+        content = _strip_code_fences(content)
     path = _project_dir(slug) / filename
     path.write_text(content)
     log.info("Saved %s for project %s", filename, slug)
@@ -236,3 +253,91 @@ def add_deferred_feature(slug: str, feature: str):
     if feature not in deferred:
         deferred.append(feature)
     update_state(slug, deferred_features=deferred)
+
+
+# --- Token usage tracking ---
+
+# Pricing per 1M tokens (input / output)
+_MODEL_PRICING = {
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+}
+
+
+def _usage_file(slug: str) -> Path:
+    return _project_dir(slug) / "usage.json"
+
+
+def load_usage(slug: str) -> dict:
+    """Load token usage data for a project."""
+    f = _usage_file(slug)
+    if not f.exists():
+        return {
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_cost_usd": 0.0,
+            "calls": 0,
+            "by_model": {},
+            "last_updated": None,
+        }
+    try:
+        return json.loads(f.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_cost_usd": 0.0,
+            "calls": 0,
+            "by_model": {},
+            "last_updated": None,
+        }
+
+
+def log_usage(slug: str, model: str, prompt_tokens: int, completion_tokens: int):
+    """Log token usage for a project."""
+    d = _project_dir(slug)
+    if not d.exists():
+        return
+
+    usage = load_usage(slug)
+
+    usage["total_prompt_tokens"] += prompt_tokens
+    usage["total_completion_tokens"] += completion_tokens
+    usage["calls"] += 1
+    usage["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+    # Per-model tracking
+    if model not in usage["by_model"]:
+        usage["by_model"][model] = {"prompt": 0, "completion": 0, "calls": 0}
+    usage["by_model"][model]["prompt"] += prompt_tokens
+    usage["by_model"][model]["completion"] += completion_tokens
+    usage["by_model"][model]["calls"] += 1
+
+    # Calculate cost
+    pricing = _MODEL_PRICING.get(model, {"input": 2.50, "output": 10.00})
+    cost = (prompt_tokens * pricing["input"] + completion_tokens * pricing["output"]) / 1_000_000
+    usage["total_cost_usd"] = round(usage["total_cost_usd"] + cost, 6)
+
+    _usage_file(slug).write_text(json.dumps(usage, indent=2))
+
+
+# --- Global learnings ---
+
+
+def load_learnings() -> list[dict]:
+    """Load accumulated learnings from all past projects."""
+    if not LEARNINGS_FILE.exists():
+        return []
+    try:
+        return json.loads(LEARNINGS_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def save_learning(learning: dict) -> None:
+    """Append a learning entry to the global learnings file."""
+    learnings = load_learnings()
+    learnings.append(learning)
+    LEARNINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LEARNINGS_FILE.write_text(json.dumps(learnings, indent=2))
+    log.info("Saved learning for project %s", learning.get("project", "?"))
