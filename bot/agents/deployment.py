@@ -103,42 +103,62 @@ async def start_deployment(slug: str, send_fn) -> None:
     # 3. Generate docker-compose.yml
     await _generate_compose(slug, src, port)
 
-    # 4. Build and run
-    await send_fn("Construyendo imagen Docker...")
-    success = await _docker_compose_up(src, slug, send_fn)
-
-    if not success:
-        await send_fn("Falló el deploy con Docker. Revisá los logs.")
-        store.transition(slug, "blocked")
-        return
-
-    # 5. Smoke test
+    # 4. Build and run — with auto-fix retry loop
     url = f"http://{LAN_IP}:{port}"
-    await send_fn("Corriendo smoke test...")
-    await asyncio.sleep(5)  # Wait for container to start
+    max_deploy_attempts = 3
+
+    for attempt in range(1, max_deploy_attempts + 1):
+        await send_fn(f"Construyendo imagen Docker (intento {attempt}/{max_deploy_attempts})...")
+        success, error_output = await _docker_compose_up(src, slug, send_fn)
+
+        if success:
+            break
+
+        if attempt < max_deploy_attempts:
+            await send_fn("Build falló. Analizando el error y corrigiendo...")
+            fixed = await _auto_fix_deploy(slug, src, error_output, port)
+            if fixed:
+                await send_fn("Apliqué un fix. Reintentando...")
+            else:
+                await send_fn("No pude diagnosticar el error automáticamente. Reintentando de todas formas...")
+        else:
+            await send_fn(
+                f"Falló después de {max_deploy_attempts} intentos.\n"
+                f"Último error:\n```\n{error_output[:300]}\n```"
+            )
+            store.transition(slug, "blocked")
+            return
+
+    # 5. Smoke test — with retries and wait
+    await send_fn("Container levantado. Corriendo smoke test...")
+    await asyncio.sleep(8)
 
     smoke_ok = await _smoke_test(url)
 
+    if not smoke_ok:
+        # Maybe needs more time — try again
+        await send_fn("Primer smoke test falló, esperando un poco más...")
+        await asyncio.sleep(10)
+        smoke_ok = await _smoke_test(url)
+
+    store.update_state(slug, url=url)
+    store.transition(slug, "deployed")
+
     if smoke_ok:
-        store.update_state(slug, url=url)
-        store.transition(slug, "deployed")
         await send_fn(
             f"Deploy exitoso!\n\n"
             f"Tu proyecto está en: {url}\n\n"
             f"Generando documentación post-deploy..."
         )
-        # Generate post-deployment docs
-        await _generate_project_log(slug, send_fn)
     else:
         await send_fn(
-            f"El container está corriendo pero el smoke test falló en {url}.\n"
-            "Puede que la app tarde en iniciar. Probá en un minuto.\n"
-            "Si no funciona, revisá los logs con:\n"
-            f"`docker logs factorybot-{slug}`"
+            f"Container corriendo pero el smoke test no pasó.\n"
+            f"URL: {url}\n"
+            f"Logs: `docker logs factorybot-{slug}`\n\n"
+            f"Generando documentación de todas formas..."
         )
-        store.update_state(slug, url=url)
-        store.transition(slug, "deployed")
-        await _generate_project_log(slug, send_fn)
+
+    await _generate_project_log(slug, send_fn)
 
 
 async def handle(slug: str, user_message: str, send_fn) -> None:
@@ -190,18 +210,18 @@ async def _generate_dockerfile(slug: str, src: Path) -> None:
 
 async def _generate_compose(slug: str, src: Path, port: int) -> None:
     """Generate a docker-compose.yml for the project."""
-    compose = {
-        "version": "3.8",
-        "services": {
-            "app": {
-                "build": ".",
-                "container_name": f"factorybot-{slug}",
-                "ports": [f"{port}:3000"],
-                "restart": "unless-stopped",
-                "env_file": [".env"] if (src / ".env").exists() else [],
-            }
-        }
+    app_service = {
+        "build": ".",
+        "container_name": f"factorybot-{slug}",
+        "ports": [f"{port}:3000"],
+        "restart": "unless-stopped",
     }
+
+    # Only add env_file if .env exists
+    if (src / ".env").exists():
+        app_service["env_file"] = ".env"
+
+    compose = {"services": {"app": app_service}}
 
     # Check if there's a different internal port in Dockerfile
     dockerfile = src / "Dockerfile"
@@ -220,9 +240,24 @@ async def _generate_compose(slug: str, src: Path, port: int) -> None:
     log.info("Generated docker-compose.yml for %s on port %d", slug, port)
 
 
-async def _docker_compose_up(src: Path, slug: str, send_fn) -> bool:
-    """Build and start the Docker container."""
+async def _docker_compose_up(src: Path, slug: str, send_fn) -> tuple[bool, str]:
+    """Build and start the Docker container. Returns (success, error_output)."""
     try:
+        # Validate compose file first
+        result = await asyncio.to_thread(
+            subprocess.run,
+            "docker compose config --quiet",
+            shell=True,
+            cwd=str(src),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout)[:500]
+            log.error("Compose validation failed: %s", error)
+            return False, f"docker-compose.yml inválido: {error}"
+
         # Build
         result = await asyncio.to_thread(
             subprocess.run,
@@ -231,14 +266,13 @@ async def _docker_compose_up(src: Path, slug: str, send_fn) -> bool:
             cwd=str(src),
             capture_output=True,
             text=True,
-            timeout=600,  # 10 min for build
+            timeout=600,
         )
 
         if result.returncode != 0:
-            error = (result.stderr or result.stdout)[:500]
-            log.error("Docker build failed: %s", error)
-            await send_fn(f"Docker build falló:\n```\n{error[:300]}\n```")
-            return False
+            error = (result.stderr or result.stdout)[:1000]
+            log.error("Docker build failed: %s", error[:200])
+            return False, error
 
         await send_fn("Imagen construida. Levantando container...")
 
@@ -254,19 +288,75 @@ async def _docker_compose_up(src: Path, slug: str, send_fn) -> bool:
         )
 
         if result.returncode != 0:
-            error = (result.stderr or result.stdout)[:500]
-            log.error("Docker up failed: %s", error)
-            await send_fn(f"Docker up falló:\n```\n{error[:300]}\n```")
-            return False
+            error = (result.stderr or result.stdout)[:1000]
+            log.error("Docker up failed: %s", error[:200])
+            return False, error
 
-        return True
+        return True, ""
 
     except subprocess.TimeoutExpired:
-        await send_fn("Docker build timeout (10 min). El proyecto puede ser muy pesado para la Pi.")
-        return False
+        return False, "Docker build timeout (10 min)"
     except Exception as e:
         log.exception("Docker error: %s", e)
+        return False, str(e)
+
+
+async def _auto_fix_deploy(slug: str, src: Path, error_output: str, port: int) -> bool:
+    """Use LLM to diagnose and fix deployment errors."""
+    files = _list_files(src)
+    dockerfile_content = ""
+    compose_content = ""
+    if (src / "Dockerfile").exists():
+        dockerfile_content = (src / "Dockerfile").read_text()[:2000]
+    if (src / "docker-compose.yml").exists():
+        compose_content = (src / "docker-compose.yml").read_text()[:1000]
+
+    prd = store.load_document(slug, "PRD.md") or ""
+
+    prompt = (
+        "A Docker deployment failed. Diagnose the error and provide a fix.\n\n"
+        f"ERROR OUTPUT:\n{error_output[:1500]}\n\n"
+        f"DOCKERFILE:\n{dockerfile_content}\n\n"
+        f"DOCKER-COMPOSE.YML:\n{compose_content}\n\n"
+        f"PROJECT FILES:\n{chr(10).join(files[:20])}\n\n"
+        f"PRD TECH SECTION:\n{prd[:1000]}\n\n"
+        f"ASSIGNED PORT: {port}\n\n"
+        "Respond in JSON:\n"
+        '{"diagnosis": "what went wrong", "fixes": ['
+        '{"file": "Dockerfile or docker-compose.yml or other", "content": "full new file content"}'
+        "]}"
+    )
+
+    raw = await chat(
+        SYSTEM_PROMPT,
+        [{"role": "user", "content": prompt}],
+        heavy=True,
+        temperature=0.2,
+        max_tokens=3000,
+        json_mode=True,
+    )
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("Could not parse auto-fix response")
         return False
+
+    fixes = data.get("fixes", [])
+    if not fixes:
+        return False
+
+    for fix in fixes:
+        filepath = src / fix.get("file", "")
+        content = fix.get("content", "")
+        if content and filepath.name:
+            # Strip markdown fences
+            content = _strip_fences(content)
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            filepath.write_text(content)
+            log.info("Auto-fix: rewrote %s", filepath)
+
+    return True
 
 
 async def _smoke_test(url: str) -> bool:
