@@ -2,6 +2,7 @@ venv/
 __pycache__/
 *.pyc
 .env
+custom_prompts.json
 projects/*/src/node_modules/
 projects/*/src/.next/
 projects/*/src/dist/

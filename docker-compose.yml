@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  factorybot:
+    build: .
+    container_name: factorybot
+    restart: unless-stopped
+    ports:
+      - "3099:3099"
+    volumes:
+      - ./projects:/app/projects
+      - ./custom_prompts.json:/app/custom_prompts.json
+    env_file:
+      - .env
